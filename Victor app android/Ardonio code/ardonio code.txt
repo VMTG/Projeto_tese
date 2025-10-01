@@ -1,0 +1,109 @@
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+#include <Adafruit_BMP280.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+
+// Sensor objects
+MPU9250_asukiaaa mpu;
+Adafruit_BMP280 bmp;
+
+// BLE service & characteristic UUIDs (must match Flutter)
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+BLECharacteristic *pCharacteristic;
+bool bmpAvailable = false;
+
+// Create custom server callbacks to handle disconnect events
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    // Connection established; you can add additional code here if needed.
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    // Restart advertising when a device disconnects
+    BLEDevice::startAdvertising();
+    Serial.println("Device disconnected, restarting advertising...");
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();  // ESP32 default: SDA=21, SCL=22
+
+  // Initialize BMP280 – try 0x76 (or 0x77 if needed)
+  if (!bmp.begin(0x76)) {
+    Serial.println("BMP280 sensor not found!");
+    bmpAvailable = false;
+  } else {
+    Serial.println("BMP280 initialized.");
+    bmpAvailable = true;
+  }
+
+  // Initialize MPU9250 sensors
+  mpu.beginAccel();
+  mpu.beginGyro();
+  mpu.beginMag();
+
+  // Set up BLE
+  BLEDevice::init("ESP32_GY91");
+  BLEServer *pServer = BLEDevice::createServer();
+  // Set the custom callbacks for connection/disconnection events.
+  pServer->setCallbacks(new MyServerCallbacks());
+  
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->start();
+
+  Serial.println("BLE advertising started.");
+}
+
+void loop() {
+  // Update MPU9250 readings
+  mpu.accelUpdate();
+  mpu.gyroUpdate();
+  mpu.magUpdate();
+
+  // Read accelerometer
+  float ax = mpu.accelX();
+  float ay = mpu.accelY();
+  float az = mpu.accelZ();
+  float accelTotal = sqrt(ax * ax + ay * ay + az * az);
+
+  // Read gyroscope
+  float gx = mpu.gyroX();
+  float gy = mpu.gyroY();
+  float gz = mpu.gyroZ();
+  float gyroTotal = sqrt(gx * gx + gy * gy + gz * gz);
+
+  // Read BMP280 (if available)
+  float temperature = 0.0;
+  float pressure = 0.0;
+  if (bmpAvailable) {
+    temperature = bmp.readTemperature();
+    pressure = bmp.readPressure() / 100.0; // Convert Pa to hPa
+  }
+
+  // Build complete sensor data string with newline delimiter.
+  String sensorData = "T:" + String(temperature, 2) + ", " +
+                      "P:" + String(pressure, 2) + ", " +
+                      "A:" + String(ax, 2) + "," + String(ay, 2) + "," + String(az, 2) + ", " +
+                      "At:" + String(accelTotal, 2) + ", " +
+                      "G:" + String(gx, 2) + "," + String(gy, 2) + "," + String(gz, 2) + ", " +
+                      "Gt:" + String(gyroTotal, 2) + "\n";
+
+  pCharacteristic->setValue(sensorData.c_str());
+  pCharacteristic->notify();
+  Serial.println(sensorData);  // Debug output
+
+  delay(500);
+}

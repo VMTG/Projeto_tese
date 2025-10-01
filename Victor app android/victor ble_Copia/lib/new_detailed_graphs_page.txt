@@ -1,0 +1,232 @@
+import 'package:flutter/material.dart';
+import 'package:Sensor/main.dart';
+import 'package:Sensor/chart_samples/line_chart_sample.dart'; // Import our custom charts
+import 'package:Sensor/chart_samples/multi_line_chart_sample.dart';
+import 'package:Sensor/chart_samples/bar_chart_sample.dart';
+import 'package:Sensor/chart_samples/heatmap_chart_sample.dart';
+
+class DetailedGraphsPage extends StatelessWidget {
+  // ----------------------
+  // Operation mode
+  // ----------------------
+  final OperationMode mode;
+  final double impactThreshold;
+
+  // ----------------------
+  // Data lists passed from main screen
+  // ----------------------
+  final List<SensorData> accelXData;
+  final List<SensorData> accelYData;
+  final List<SensorData> accelZData;
+  final List<SensorData> accelTotalData;
+  final List<SensorData> gyroXData;
+  final List<SensorData> gyroYData;
+  final List<SensorData> gyroZData;
+  final List<SensorData> gyroTotalData;
+
+  const DetailedGraphsPage({
+    super.key,
+    required this.mode,
+    required this.impactThreshold,
+    required this.accelXData,
+    required this.accelYData,
+    required this.accelZData,
+    required this.accelTotalData,
+    required this.gyroXData,
+    required this.gyroYData,
+    required this.gyroZData,
+    required this.gyroTotalData,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+            'Detailed Graphs - ${mode == OperationMode.continuous ? 'Continuous Mode' : 'Impact Mode'}'),
+      ),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: Column(
+            children: [
+              // Mode info banner
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                color: mode == OperationMode.continuous
+                    ? Colors.blue.shade100
+                    : Colors.orange.shade100,
+                child: Row(
+                  children: [
+                    Icon(
+                      mode == OperationMode.continuous
+                          ? Icons.play_circle_outline
+                          : Icons.flash_on,
+                      color: mode == OperationMode.continuous
+                          ? Colors.blue
+                          : Colors.orange,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        mode == OperationMode.continuous
+                            ? 'Continuous Mode: Data is displayed continuously'
+                            : 'Impact Mode: Data is only displayed when an impact is detected (Threshold: $impactThreshold g)',
+                        style: TextStyle(
+                          color: mode == OperationMode.continuous
+                              ? Colors.blue.shade800
+                              : Colors.orange.shade800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // ----------------------
+              // Accelerometer Data Section
+              // ----------------------
+              const Text('Accelerometer Data',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              _buildSingleLineChart('Ax vs. Time', accelXData, Colors.blue),
+              _buildSingleLineChart('Ay vs. Time', accelYData, Colors.green),
+              _buildSingleLineChart('Az vs. Time', accelZData, Colors.orange),
+              _buildSingleLineChart(
+                'Total Acceleration vs. Time',
+                accelTotalData,
+                Colors.red,
+                threshold: impactThreshold,
+              ),
+              const SizedBox(height: 20),
+
+              // ----------------------
+              // Gyroscope Data Section
+              // ----------------------
+              const Text('Gyroscope Data',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              _buildSingleLineChart('Gx vs. Time', gyroXData, Colors.purple),
+              _buildSingleLineChart('Gy vs. Time', gyroYData, Colors.teal),
+              _buildSingleLineChart('Gz vs. Time', gyroZData, Colors.amber),
+              _buildSingleLineChart(
+                  'Total Rotation vs. Time', gyroTotalData, Colors.indigo),
+              const SizedBox(height: 20),
+
+              // ----------------------
+              // Combined Graphs Section
+              // ----------------------
+              const Text('Combined Graphs',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              // Multi-series line charts
+              MultiLineChartSample(
+                title: 'X, Y, Z Accelerations',
+                dataSeries: [accelXData, accelYData, accelZData],
+                seriesNames: ['Ax', 'Ay', 'Az'],
+                seriesColors: [Colors.blue, Colors.green, Colors.orange],
+              ),
+              const SizedBox(height: 12),
+
+              MultiLineChartSample(
+                title: 'X, Y, Z Rotations',
+                dataSeries: [gyroXData, gyroYData, gyroZData],
+                seriesNames: ['Gx', 'Gy', 'Gz'],
+                seriesColors: [Colors.purple, Colors.teal, Colors.amber],
+              ),
+              const SizedBox(height: 12),
+
+              MultiLineChartSample(
+                title: 'Total Acceleration & Rotation',
+                dataSeries: [accelTotalData, gyroTotalData],
+                seriesNames: ['Acceleration', 'Rotation'],
+                seriesColors: [Colors.red, Colors.indigo],
+              ),
+              const SizedBox(height: 20),
+
+              // ----------------------
+              // Bar Charts Section
+              // ----------------------
+              const Text('Bar Chart Comparison',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              BarChartSample(
+                title: 'X, Y, Z Accelerations (Bar)',
+                dataSeries: [accelXData, accelYData, accelZData],
+                seriesNames: ['Ax', 'Ay', 'Az'],
+                seriesColors: [Colors.blue, Colors.green, Colors.orange],
+              ),
+              const SizedBox(height: 12),
+
+              BarChartSample(
+                title: 'X, Y, Z Rotations (Bar)',
+                dataSeries: [gyroXData, gyroYData, gyroZData],
+                seriesNames: ['Gx', 'Gy', 'Gz'],
+                seriesColors: [Colors.purple, Colors.teal, Colors.amber],
+              ),
+              const SizedBox(height: 12),
+
+              BarChartSample(
+                title: 'Total Acceleration & Rotation (Bar)',
+                dataSeries: [accelTotalData, gyroTotalData],
+                seriesNames: ['Acceleration', 'Rotation'],
+                seriesColors: [Colors.red, Colors.indigo],
+              ),
+              const SizedBox(height: 20),
+
+              // ----------------------
+              // Impact Detection Section
+              // ----------------------
+              const Text('Impact Detection (Acceleration Threshold)',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              _buildSingleLineChart(
+                'Acceleration vs. Time (Threshold Marked)',
+                accelTotalData,
+                Colors.red,
+                threshold: impactThreshold,
+                showDots: true,
+              ),
+              const SizedBox(height: 12),
+
+              // Add this new heatmap visualization
+              HeatmapChartSample(
+                title: 'Impact Heatmap',
+                data: accelTotalData,
+                threshold: impactThreshold,
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Helper method to build single line charts
+  Widget _buildSingleLineChart(
+    String title,
+    List<SensorData> data,
+    Color color, {
+    double? threshold,
+    bool showDots = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12.0),
+      child: LineChartSample(
+        title: title,
+        data: data,
+        lineColor: color,
+        threshold: threshold,
+        showDots: showDots,
+      ),
+    );
+  }
+}

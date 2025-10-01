@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "898617127901",
+    "project_id": "sensor-app-1071d",
+    "storage_bucket": "sensor-app-1071d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:898617127901:android:822d042c9a7549dcc4fc34",
+        "android_client_info": {
+          "package_name": "com.example.omnible_ble"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCuS0R0BdoU5w4UQcx05PBchr2eiGpxqJo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
