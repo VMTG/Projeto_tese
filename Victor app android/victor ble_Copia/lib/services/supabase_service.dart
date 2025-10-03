@@ -57,6 +57,11 @@ class SupabaseService {
   // Timer para polling
   Timer? _pollingTimer;
 
+  // Variáveis para processamento de impacto
+  String? _currentImpactTimestamp;
+  int _expectedSamples = 0;
+  List<Map<String, dynamic>> _impactDataBuffer = [];
+
   // Inicializar o serviço Supabase com as credenciais fornecidas
   Future<void> initialize(String supabaseUrl, String supabaseKey) async {
     if (_initialized) return;

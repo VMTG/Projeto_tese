@@ -1,39 +1,31 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:supabase/supabase.dart';
 import 'package:uuid/uuid.dart';
 import 'package:Sensor/main.dart';
 
 class SupabaseService {
-  // Singleton pattern
   static final SupabaseService _instance = SupabaseService._internal();
   factory SupabaseService() => _instance;
   SupabaseService._internal();
 
-  // Supabase client
   late SupabaseClient _supabase;
   bool _initialized = false;
   bool get isInitialized => _initialized;
 
-  // Device ID
   String _deviceId = '';
   String get deviceId => _deviceId;
 
-  // Impact detection
-  double _impactThreshold = 5.0;
+  double _impactThreshold = 10.0; // Deve corresponder ao ESP32
   double get impactThreshold => _impactThreshold;
   DateTime? _lastImpactTime;
   DateTime? get lastImpactTime => _lastImpactTime;
 
-  // Operation mode
   OperationMode _currentMode = OperationMode.continuous;
   OperationMode get currentMode => _currentMode;
   set currentMode(OperationMode mode) {
     _currentMode = mode;
 
-    // Se o modo for neutro, podemos limpar os dados em cache ou parar de processar
     if (mode == OperationMode.neutral) {
-      // Limpar os dados em cache
       _resetDataStreams();
     }
 
@@ -45,7 +37,6 @@ class SupabaseService {
         } else if (mode == OperationMode.impact) {
           modeString = 'impact';
         } else {
-          // mode == OperationMode.neutral
           modeString = 'neutral';
         }
 
@@ -59,7 +50,6 @@ class SupabaseService {
   }
 
   void _resetDataStreams() {
-    // Limpar todos os dados em cache
     _temperatureStreamController.add([]);
     _pressureStreamController.add([]);
     _accelXStreamController.add([]);
@@ -71,7 +61,6 @@ class SupabaseService {
     _gyroZStreamController.add([]);
     _gyroTotalStreamController.add([]);
 
-    // Também limpar os buffers de pré-impacto
     _preImpactTempBuffer.clear();
     _preImpactPressureBuffer.clear();
     _preImpactAccelXBuffer.clear();
@@ -83,12 +72,16 @@ class SupabaseService {
     _preImpactGyroZBuffer.clear();
     _preImpactGyroTotalBuffer.clear();
 
-    // Resetar flags
     _impactDataDisplayed = false;
     _lastImpactTime = null;
+
+    // Limpar variáveis de processamento de impacto
+    _currentImpactTimestamp = null;
+    _expectedSamples = 0;
+    _impactDataBuffer.clear();
   }
 
-  // Stream controllers para dados básicos do sensor
+  // Stream controllers
   final _temperatureStreamController =
       StreamController<List<SensorData>>.broadcast();
   final _pressureStreamController =
@@ -97,8 +90,6 @@ class SupabaseService {
       StreamController<List<SensorData>>.broadcast();
   final _gyroTotalStreamController =
       StreamController<List<SensorData>>.broadcast();
-
-  // Stream controllers para dados de eixos individuais
   final _accelXStreamController =
       StreamController<List<SensorData>>.broadcast();
   final _accelYStreamController =
@@ -108,11 +99,9 @@ class SupabaseService {
   final _gyroXStreamController = StreamController<List<SensorData>>.broadcast();
   final _gyroYStreamController = StreamController<List<SensorData>>.broadcast();
   final _gyroZStreamController = StreamController<List<SensorData>>.broadcast();
-
-  // Stream controller para notificação de impacto
   final _impactDetectedController = StreamController<DateTime>.broadcast();
 
-  // Getters para streams básicos
+  // Getters para streams
   Stream<List<SensorData>> get temperatureStream =>
       _temperatureStreamController.stream;
   Stream<List<SensorData>> get pressureStream =>
@@ -121,19 +110,14 @@ class SupabaseService {
       _accelTotalStreamController.stream;
   Stream<List<SensorData>> get gyroTotalStream =>
       _gyroTotalStreamController.stream;
-
-  // Getters para streams de eixos individuais
   Stream<List<SensorData>> get accelXStream => _accelXStreamController.stream;
   Stream<List<SensorData>> get accelYStream => _accelYStreamController.stream;
   Stream<List<SensorData>> get accelZStream => _accelZStreamController.stream;
   Stream<List<SensorData>> get gyroXStream => _gyroXStreamController.stream;
   Stream<List<SensorData>> get gyroYStream => _gyroYStreamController.stream;
   Stream<List<SensorData>> get gyroZStream => _gyroZStreamController.stream;
-
-  // Getter para stream de impacto
   Stream<DateTime> get impactDetectedStream => _impactDetectedController.stream;
 
-  // Timer para polling
   Timer? _pollingTimer;
 
   // Controle de dados em modo de impacto
@@ -153,25 +137,20 @@ class SupabaseService {
   final List<SensorData> _preImpactGyroTotalBuffer = [];
   final int _bufferSize = 50;
 
-  // Inicializar o serviço Supabase com as credenciais fornecidas
+  // Variáveis para processamento de impacto via BLE
+  String? _currentImpactTimestamp;
+  int _expectedSamples = 0;
+  List<Map<String, dynamic>> _impactDataBuffer = [];
+
   Future<bool> initialize(String supabaseUrl, String supabaseKey) async {
     if (_initialized) return true;
 
     try {
-      // Criar cliente Supabase
       _supabase = SupabaseClient(supabaseUrl, supabaseKey);
-
-      // Testar conexão
       await testConnection();
-
       _initialized = true;
-
-      // Gerar ID de dispositivo
       await _initializeDevice();
-
-      // Configurar polling periódico
       _setupDataPolling();
-
       print('Supabase service initialized with device ID: $_deviceId');
       return true;
     } catch (e) {
@@ -180,7 +159,6 @@ class SupabaseService {
     }
   }
 
-  // Testar conexão com o Supabase
   Future<bool> testConnection() async {
     try {
       final response = await _supabase.from('devices').select().limit(1);
@@ -192,29 +170,61 @@ class SupabaseService {
     }
   }
 
-  // Registrar ou recuperar ID do dispositivo
   Future<void> _initializeDevice() async {
     try {
-      // Gerar novo ID de dispositivo
       final uuid = Uuid();
       _deviceId = uuid.v4();
 
-      // Registrar dispositivo no Supabase
-      await _supabase.from('devices').insert({
+      // Tentar inserir o device e verificar resposta
+      final insertResponse = await _supabase.from('devices').insert({
         'id': _deviceId,
         'name': 'ESP32_GY91',
         'operation_mode':
             _currentMode == OperationMode.continuous ? 'continuous' : 'impact',
         'impact_threshold': _impactThreshold,
-      });
+      }).select(); // pedir dados de retorno para verificar
 
-      print('Device registered with ID: $_deviceId');
+      // Se a resposta tiver erro, insertResponse pode estar vazio ou null
+      if (insertResponse == null ||
+          (insertResponse is List && insertResponse.isEmpty)) {
+        // Tentar recuperar device por name (caso já exista)
+        final query = await _supabase
+            .from('devices')
+            .select()
+            .eq('name', 'ESP32_GY91')
+            .limit(1);
+        if (query != null && query is List && query.isNotEmpty) {
+          final found = query.first;
+          if (found['id'] != null) {
+            _deviceId = found['id'] as String;
+            print('Device already exists. Using existing ID: $_deviceId');
+            return;
+          }
+        }
+
+        print(
+            'Warning: device insert returned empty. DeviceId left as: $_deviceId');
+      } else {
+        // Normalmente insertResponse contém a linha criada
+        try {
+          final created =
+              insertResponse is List ? insertResponse.first : insertResponse;
+          if (created != null && created['id'] != null) {
+            _deviceId = created['id'] as String;
+            print('Device registered with ID: $_deviceId');
+            return;
+          }
+        } catch (_) {
+          print('Device inserted but response parsing failed. ID: $_deviceId');
+        }
+      }
     } catch (e) {
       print('Error initializing device: $e');
+      // Não limpar _deviceId aqui — se insert falhou por RLS ou permissões,
+      // manter o uuid local pode ajudar no debugging, mas avisa no log
     }
   }
 
-  // Atualizar threshold de impacto
   Future<void> updateImpactThreshold(double threshold) async {
     _impactThreshold = threshold;
 
@@ -231,27 +241,21 @@ class SupabaseService {
     }
   }
 
-  // Configurar polling periódico para simular Realtime
   void _setupDataPolling() {
-    // Polling a cada 1 segundo
     _pollingTimer = Timer.periodic(Duration(milliseconds: 1000), (timer) {
       _pollSensorData();
     });
   }
 
-  // Buscar dados periodicamente
   Future<void> _pollSensorData() async {
     if (!_initialized || _deviceId.isEmpty) return;
 
     try {
-      // Se estiver em modo de impacto e não estiver mostrando dados de impacto,
-      // apenas atualizar o buffer e verificar impactos
       if (_currentMode == OperationMode.impact && !_impactDataDisplayed) {
         await _checkForImpacts();
         return;
       }
 
-      // Buscar últimos dados de sensores
       final sensorData = await _supabase
           .from('raw_sensor_data')
           .select()
@@ -267,9 +271,7 @@ class SupabaseService {
     }
   }
 
-  // Processar dados dos sensores obtidos do Supabase
   void _processSensorData(List<dynamic> data) {
-    // Listas temporárias para armazenar os dados
     List<SensorData> tempData = [];
     List<SensorData> pressureData = [];
     List<SensorData> accelXData = [];
@@ -281,10 +283,8 @@ class SupabaseService {
     List<SensorData> gyroZData = [];
     List<SensorData> gyroTotalData = [];
 
-    // Inverter a ordem para cronológica (mais antigo primeiro)
     data = data.reversed.toList();
 
-    // Processar dados
     for (var item in data) {
       try {
         DateTime timestamp = DateTime.parse(item['timestamp'] as String);
@@ -310,9 +310,7 @@ class SupabaseService {
         gyroTotalData
             .add(SensorData(timestamp, (item['gyro_total'] as num).toDouble()));
 
-        // Em modo contínuo ou quando mostrando dados de impacto, atualizar todos os buffers
         if (_currentMode == OperationMode.continuous || _impactDataDisplayed) {
-          // Enviar dados para as streams
           _temperatureStreamController.add(tempData);
           _pressureStreamController.add(pressureData);
           _accelXStreamController.add(accelXData);
@@ -324,7 +322,6 @@ class SupabaseService {
           _gyroZStreamController.add(gyroZData);
           _gyroTotalStreamController.add(gyroTotalData);
         } else {
-          // Em modo de impacto sem impacto detectado, atualizar buffer pré-impacto
           _updatePreImpactBuffer(
               timestamp,
               (item['temperature'] as num).toDouble(),
@@ -344,12 +341,10 @@ class SupabaseService {
     }
   }
 
-  // Verificar impactos nos dados recentes
   Future<void> _checkForImpacts() async {
     if (_currentMode != OperationMode.impact) return;
 
     try {
-      // Buscar dados mais recentes
       final recentData = await _supabase
           .from('raw_sensor_data')
           .select()
@@ -362,7 +357,6 @@ class SupabaseService {
           double accelTotal = (item['accel_total'] as num).toDouble();
           DateTime timestamp = DateTime.parse(item['timestamp'] as String);
 
-          // Atualizar buffer pré-impacto
           _updatePreImpactBuffer(
               timestamp,
               (item['temperature'] as num).toDouble(),
@@ -376,7 +370,6 @@ class SupabaseService {
               (item['gyro_z'] as num).toDouble(),
               (item['gyro_total'] as num).toDouble());
 
-          // Verificar se aceleração total excede o threshold
           if (accelTotal >= _impactThreshold) {
             _handleImpactDetected(timestamp);
             break;
@@ -388,15 +381,12 @@ class SupabaseService {
     }
   }
 
-  // Lidar com impacto detectado
   void _handleImpactDetected(DateTime impactTime) {
     _lastImpactTime = impactTime;
     _impactDataDisplayed = true;
 
-    // Notificar sobre o impacto
     _impactDetectedController.add(impactTime);
 
-    // Enviar dados do buffer pré-impacto para as streams
     _temperatureStreamController.add(_preImpactTempBuffer);
     _pressureStreamController.add(_preImpactPressureBuffer);
     _accelXStreamController.add(_preImpactAccelXBuffer);
@@ -408,13 +398,11 @@ class SupabaseService {
     _gyroZStreamController.add(_preImpactGyroZBuffer);
     _gyroTotalStreamController.add(_preImpactGyroTotalBuffer);
 
-    // Configurar timer para resetar o modo de impacto após 10 segundos
     Timer(Duration(seconds: 10), () {
       _impactDataDisplayed = false;
     });
   }
 
-  // Atualizar buffer pré-impacto
   void _updatePreImpactBuffer(
       DateTime timestamp,
       double temp,
@@ -427,7 +415,6 @@ class SupabaseService {
       double gy,
       double gz,
       double gyroTotal) {
-    // Adicionar aos buffers pré-impacto
     _preImpactTempBuffer.add(SensorData(timestamp, temp));
     _preImpactPressureBuffer.add(SensorData(timestamp, pressure));
     _preImpactAccelXBuffer.add(SensorData(timestamp, ax));
@@ -439,7 +426,6 @@ class SupabaseService {
     _preImpactGyroZBuffer.add(SensorData(timestamp, gz));
     _preImpactGyroTotalBuffer.add(SensorData(timestamp, gyroTotal));
 
-    // Manter buffers no tamanho definido
     if (_preImpactTempBuffer.length > _bufferSize)
       _preImpactTempBuffer.removeAt(0);
     if (_preImpactPressureBuffer.length > _bufferSize)
@@ -462,36 +448,201 @@ class SupabaseService {
       _preImpactGyroTotalBuffer.removeAt(0);
   }
 
-  // Enviar dados brutos do sensor para o Supabase
+  // PROCESSAMENTO DE DADOS VIA BLE (MODO DE IMPACTO)
   Future<void> sendSensorData(String rawData) async {
     if (!_initialized || _deviceId.isEmpty) return;
 
     try {
-      // Analisar os dados brutos do sensor
+      // Verificar tipo de mensagem do ESP32
+      if (rawData.startsWith('IMPACT_START:')) {
+        _handleImpactStart(rawData);
+      } else if (rawData.startsWith('IMPACT_DATA:')) {
+        _handleImpactData(rawData);
+      } else if (rawData.startsWith('IMPACT_END:')) {
+        await _handleImpactEnd(rawData);
+      } else if (rawData.contains('A:') && rawData.contains('G:')) {
+        // Dados de modo contínuo
+        await _handleContinuousData(rawData);
+      }
+    } catch (e) {
+      print('Error processing sensor data: $e');
+    }
+  }
+
+  // Processar início de evento de impacto
+  void _handleImpactStart(String data) {
+    try {
+      // Formato: IMPACT_START:timestamp,totalSamples,preImpactSamples
+      final parts = data.substring(13).split(',');
+      // Guardar o timestamp vindo do ESP apenas como referência (millis desde boot).
+      final espImpactMillis = parts.isNotEmpty ? parts[0] : null;
+      _expectedSamples = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
+      _impactDataBuffer.clear();
+
+      // **Registar um timestamp absoluto que usaremos na BD**
+      final nowIso = DateTime.now().toIso8601String();
+      _currentImpactTimestamp = nowIso; // string ISO usada para inserir na BD
+      print('📥 Impact event started (ESP millis: $espImpactMillis). '
+          'Using impact_timestamp = $_currentImpactTimestamp, expecting $_expectedSamples samples');
+    } catch (e) {
+      print('❌ Error handling impact start: $e');
+    }
+  }
+
+  // Processar dados de impacto individuais
+  void _handleImpactData(String data) {
+    try {
+      // Formato: IMPACT_DATA:impactTimestamp,sequenceNumber,isPreImpact,timestamp,ax,ay,az,at,gx,gy,gz,gt
+      final parts = data.substring(12).split(',');
+
+      if (parts.length < 12) {
+        print('❌ Invalid impact data format: $data');
+        return;
+      }
+
+      if (_currentImpactTimestamp == null) {
+        // Se não tivermos um impact start registado, criar um now e avisar
+        _currentImpactTimestamp = DateTime.now().toIso8601String();
+        print(
+            '⚠️ IMPACT_DATA recebido sem IMPACT_START. Criando impact_timestamp: $_currentImpactTimestamp');
+      }
+
+      final sequenceNumber = int.parse(parts[1]);
+      final isPreImpact = parts[2] == '1';
+
+      // sampleTimestamp é millis do ESP — em vez de converter estranhamente,
+      // usamos timestamp absoluto agora (DateTime.now()), mas guardamos também a millis original como meta se quiseres.
+      final sampleTimestampMillis = int.tryParse(parts[3]) ?? 0;
+      final sampleIso = DateTime.now().toIso8601String();
+
+      final ax = double.parse(parts[4]);
+      final ay = double.parse(parts[5]);
+      final az = double.parse(parts[6]);
+      final accelTotal = double.parse(parts[7]);
+      final gx = double.parse(parts[8]);
+      final gy = double.parse(parts[9]);
+      final gz = double.parse(parts[10]);
+      final gyroTotal = double.parse(parts[11]);
+
+      // Armazenar no buffer (usar _currentImpactTimestamp ISO)
+      _impactDataBuffer.add({
+        'device_id': _deviceId,
+        'impact_timestamp': _currentImpactTimestamp,
+        'sample_timestamp': sampleIso,
+        'sequence_number': sequenceNumber,
+        'is_pre_impact': isPreImpact,
+        'accel_x': ax,
+        'accel_y': ay,
+        'accel_z': az,
+        'accel_total': accelTotal,
+        'gyro_x': gx,
+        'gyro_y': gy,
+        'gyro_z': gz,
+        'gyro_total': gyroTotal,
+        // opcional: guardar o millis original para referência
+        //'sample_millis': sampleTimestampMillis,
+      });
+
+      print(
+          '📊 Buffered impact sample ${sequenceNumber + 1}/$_expectedSamples');
+    } catch (e) {
+      print('❌ Error handling impact data: $e');
+    }
+  }
+
+  // Processar fim de evento de impacto - ENVIA PARA SUPABASE
+  Future<void> _handleImpactEnd(String data) async {
+    try {
+      print(
+          '✅ Impact event ended. Sending ${_impactDataBuffer.length} samples to Supabase...');
+
+      if (_impactDataBuffer.isEmpty) {
+        print('⚠️ Warning: No impact data to send');
+        return;
+      }
+
+      // Inserir em lote e verificar resposta
+      final response = await _supabase
+          .from('impact_mode_data')
+          .insert(_impactDataBuffer)
+          .select();
+      // O pacote supabase/supabase.dart normalmente retorna algo (lista) quando .select() é usado.
+      if (response == null) {
+        print('❌ Insert returned null response. Trying batch fallback.');
+        await _sendImpactDataInBatches();
+      } else {
+        print(
+            '🎉 Successfully sent ${_impactDataBuffer.length} impact samples to Supabase (response length: ${(response is List) ? response.length : 1})');
+      }
+
+      // Notificar a UI sobre o impacto
+      _impactDetectedController.add(DateTime.now());
+
+      // Limpar buffer
+      _impactDataBuffer.clear();
+      _currentImpactTimestamp = null;
+      _expectedSamples = 0;
+    } catch (e) {
+      print('❌ Error handling impact end: $e');
+      // Se houver erro, tentar enviar em batches
+      await _sendImpactDataInBatches();
+    }
+  }
+
+  // Fallback: enviar em lotes menores se der erro
+  Future<void> _sendImpactDataInBatches() async {
+    const batchSize = 10;
+
+    for (int i = 0; i < _impactDataBuffer.length; i += batchSize) {
+      try {
+        final end = (i + batchSize < _impactDataBuffer.length)
+            ? i + batchSize
+            : _impactDataBuffer.length;
+
+        final batch = _impactDataBuffer.sublist(i, end);
+        final resp =
+            await _supabase.from('impact_mode_data').insert(batch).select();
+
+        if (resp == null) {
+          print('❌ Batch ${i ~/ batchSize + 1} insert returned null.');
+        } else {
+          print(
+              '✅ Sent batch ${i ~/ batchSize + 1} (${batch.length} samples). Response len: ${(resp is List) ? resp.length : 1}');
+        }
+
+        await Future.delayed(Duration(milliseconds: 100));
+      } catch (e) {
+        print('❌ Error sending batch ${i ~/ batchSize + 1}: $e');
+      }
+    }
+
+    // Se tudo correr bem, limpar buffer
+    _impactDataBuffer.clear();
+    _currentImpactTimestamp = null;
+    _expectedSamples = 0;
+  }
+
+  // Processar dados de modo contínuo
+  Future<void> _handleContinuousData(String rawData) async {
+    try {
+      // Formato: A:ax,ay,az, At:at, G:gx,gy,gz, Gt:gt
       final RegExp regExp = RegExp(
-        r'T:([\d.]+), P:([\d.]+), A:([\d.-]+),([\d.-]+),([\d.-]+), At:([\d.]+), G:([\d.-]+),([\d.-]+),([\d.-]+), Gt:([\d.]+)',
+        r'A:([\d.-]+),([\d.-]+),([\d.-]+),\s*At:([\d.]+),\s*G:([\d.-]+),([\d.-]+),([\d.-]+),\s*Gt:([\d.]+)',
       );
       final Match? match = regExp.firstMatch(rawData);
 
       if (match != null) {
-        final double temp = double.parse(match.group(1)!);
-        final double pressure = double.parse(match.group(2)!);
-        final double ax = double.parse(match.group(3)!);
-        final double ay = double.parse(match.group(4)!);
-        final double az = double.parse(match.group(5)!);
-        final double accelTotal = double.parse(match.group(6)!);
-        final double gx = double.parse(match.group(7)!);
-        final double gy = double.parse(match.group(8)!);
-        final double gz = double.parse(match.group(9)!);
-        final double gyroTotal = double.parse(match.group(10)!);
+        final double ax = double.parse(match.group(1)!);
+        final double ay = double.parse(match.group(2)!);
+        final double az = double.parse(match.group(3)!);
+        final double accelTotal = double.parse(match.group(4)!);
+        final double gx = double.parse(match.group(5)!);
+        final double gy = double.parse(match.group(6)!);
+        final double gz = double.parse(match.group(7)!);
+        final double gyroTotal = double.parse(match.group(8)!);
 
-        final DateTime now = DateTime.now();
-
-        // Enviar dados para o Supabase
         await _supabase.from('raw_sensor_data').insert({
           'device_id': _deviceId,
-          'temperature': temp,
-          'pressure': pressure,
           'accel_x': ax,
           'accel_y': ay,
           'accel_z': az,
@@ -500,27 +651,28 @@ class SupabaseService {
           'gyro_y': gy,
           'gyro_z': gz,
           'gyro_total': gyroTotal,
-          'timestamp': now.toIso8601String(),
+          'timestamp': DateTime.now().toIso8601String(),
         });
 
-        // Verificar impacto para modo de impacto
-        if (_currentMode == OperationMode.impact &&
-            accelTotal >= _impactThreshold &&
-            !_impactDataDisplayed) {
-          _handleImpactDetected(now);
-        }
+        print('✅ Sent continuous data to Supabase');
       }
     } catch (e) {
-      print('Error sending data to Supabase: $e');
+      print('❌ Error handling continuous data: $e');
     }
   }
 
-  // Limpar exibição de impacto
+  // Converter millis do ESP32 para DateTime
+  String _convertMillisToDateTime(int millis) {
+    final now = DateTime.now();
+    // Usar timestamp relativo ao momento atual
+    final timestamp = now.subtract(Duration(milliseconds: millis % 1000000));
+    return timestamp.toIso8601String();
+  }
+
   void resetImpactDisplay() {
     _impactDataDisplayed = false;
   }
 
-  // Limpar recursos
   void dispose() {
     _pollingTimer?.cancel();
     _temperatureStreamController.close();

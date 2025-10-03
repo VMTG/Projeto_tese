@@ -241,50 +241,110 @@ void addToBuffer(float ax, float ay, float az, float accelTotal,
     // Quando atingirmos o número desejado de amostras pós-impacto,
     // processar o evento de impacto completo
     if (postImpactSamplesCollected >= POST_IMPACT_SAMPLES) {
-      processImpactEvent();
+      prepareImpactEvent();
       collectingPostImpact = false;
       postImpactSamplesCollected = 0;
     }
   }
 }
 
-// Função para processar evento de impacto
-void processImpactEvent() {
-  Serial.println("IMPACTO DETECTADO! Enviando buffer de dados...");
+// Variável global para armazenar dados de impacto completos
+struct ImpactEvent {
+  unsigned long impactTimestamp;
+  int totalSamples;
+  int preImpactSamples;
+  SensorData samples[BUFFER_SIZE];
+  bool ready;
+};
+
+ImpactEvent currentImpact;
+
+// Função chamada quando o buffer pós-impacto está completo
+void prepareImpactEvent() {
+  Serial.println("IMPACTO DETECTADO! Preparando dados...");
   
-  // Calcular índice inicial para envio 
-  // (atual - amostras pós-impacto coletadas)
-  int startIdx = (bufferIndex - postImpactSamplesCollected + BUFFER_SIZE) % BUFFER_SIZE;
+  // Armazenar timestamp do impacto
+  currentImpact.impactTimestamp = millis();
+  currentImpact.totalSamples = BUFFER_SIZE;
+  currentImpact.preImpactSamples = BUFFER_SIZE - postImpactSamplesCollected;
   
-  // Enviando a primeira metade do buffer (dados pré-impacto)
+  // Copiar todos os dados do buffer circular para o evento
   for (int i = 0; i < BUFFER_SIZE; i++) {
     int idx = (bufferIndex + i) % BUFFER_SIZE;
-    
-    // Formatar dados do buffer para envio
-    String bufferData = "IMPACT:" + 
-      String(circularBuffer[idx].timestamp) + "," +
-      String(circularBuffer[idx].ax, 2) + "," + 
-      String(circularBuffer[idx].ay, 2) + "," + 
-      String(circularBuffer[idx].az, 2) + "," + 
-      String(circularBuffer[idx].accelTotal, 2) + "," +
-      String(circularBuffer[idx].gx, 2) + "," + 
-      String(circularBuffer[idx].gy, 2) + "," + 
-      String(circularBuffer[idx].gz, 2) + "," + 
-      String(circularBuffer[idx].gyroTotal, 2) + "," +
-      String(circularBuffer[idx].temperature, 2) + "," +
-      String(circularBuffer[idx].pressure, 2) + "," +
-      String(circularBuffer[idx].altitude, 2);
-    
-    if (deviceConnected) {
-      pCharacteristic->setValue(bufferData.c_str());
-      pCharacteristic->notify();
-    }
-    
-    Serial.println(bufferData);
-    delay(10);  // Pequeno delay entre notificações para não sobrecarregar
+    currentImpact.samples[i] = circularBuffer[idx];
   }
   
-  // Limpar a flag de impacto
+  currentImpact.ready = true;
+  
+  Serial.println("Dados de impacto prontos para envio!");
+  Serial.println("Total de amostras: " + String(BUFFER_SIZE));
+  Serial.println("Amostras pré-impacto: " + String(currentImpact.preImpactSamples));
+  Serial.println("Amostras pós-impacto: " + String(postImpactSamplesCollected));
+}
+
+// Função para enviar evento de impacto via BLE
+void sendImpactEvent() {
+  if (!currentImpact.ready || !deviceConnected) {
+    Serial.println("Evento de impacto não está pronto ou dispositivo desconectado");
+    return;
+  }
+  
+  Serial.println("Iniciando envio de evento de impacto via BLE...");
+  
+  // 1. Enviar cabeçalho do impacto
+  String impactHeader = "IMPACT_START:" + 
+                        String(currentImpact.impactTimestamp) + "," + 
+                        String(currentImpact.totalSamples) + "," + 
+                        String(currentImpact.preImpactSamples);
+  
+  pCharacteristic->setValue(impactHeader.c_str());
+  pCharacteristic->notify();
+  delay(30);
+  Serial.println("→ " + impactHeader);
+  
+  // 2. Enviar todas as amostras sequencialmente
+  for (int i = 0; i < currentImpact.totalSamples; i++) {
+    // Determinar se é pré ou pós-impacto
+    bool isPreImpact = (i < currentImpact.preImpactSamples);
+    
+    // Formatar dados da amostra
+    String sampleData = "IMPACT_DATA:" + 
+      String(currentImpact.impactTimestamp) + "," +
+      String(i) + "," +
+      String(isPreImpact ? 1 : 0) + "," +
+      String(currentImpact.samples[i].timestamp) + "," +
+      String(currentImpact.samples[i].ax, 4) + "," + 
+      String(currentImpact.samples[i].ay, 4) + "," + 
+      String(currentImpact.samples[i].az, 4) + "," + 
+      String(currentImpact.samples[i].accelTotal, 4) + "," +
+      String(currentImpact.samples[i].gx, 4) + "," + 
+      String(currentImpact.samples[i].gy, 4) + "," + 
+      String(currentImpact.samples[i].gz, 4) + "," + 
+      String(currentImpact.samples[i].gyroTotal, 4);
+    
+    pCharacteristic->setValue(sampleData.c_str());
+    pCharacteristic->notify();
+    
+    // Delay adaptativo baseado no progresso
+    if (i % 10 == 0) {
+      delay(25);  // Delay maior a cada 10 amostras
+      Serial.println("→ Progresso: " + String(i + 1) + "/" + String(currentImpact.totalSamples));
+    } else {
+      delay(15);
+    }
+  }
+  
+  // 3. Enviar marcador de fim
+  String impactEnd = "IMPACT_END:" + String(currentImpact.impactTimestamp);
+  pCharacteristic->setValue(impactEnd.c_str());
+  pCharacteristic->notify();
+  delay(30);
+  Serial.println("→ " + impactEnd);
+  
+  Serial.println("✓ Evento de impacto enviado com sucesso!");
+  
+  // Limpar o evento
+  currentImpact.ready = false;
   impactDetected = false;
 }
 
@@ -575,6 +635,12 @@ void loop() {
     String statusMsg = "STATUS:Device in mode " + String(currentMode);
     pCharacteristic->setValue(statusMsg.c_str());
     pCharacteristic->notify();
+  }
+
+  // === NOVO: Enviar evento de impacto se estiver pronto ===
+  if (currentImpact.ready && deviceConnected && currentMode == MODE_IMPACT_ONLY) {
+    Serial.println("[IMPACT MODE] Enviando evento de impacto...");
+    sendImpactEvent();
   }
   
   // Manter a mesma taxa de amostragem em todos os modos

@@ -3,45 +3,33 @@ import 'dart:convert';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:flutter/material.dart';
 import 'package:Sensor/services/supabase_service.dart';
+import 'package:Sensor/main.dart';
 
-// Callback typedefs para processamento de dados
 typedef DataProcessor = void Function(String data);
 
 class BluetoothService {
-  // Implementação do padrão Singleton
   static final BluetoothService _instance = BluetoothService._internal();
-
-  factory BluetoothService() {
-    return _instance;
-  }
-
+  factory BluetoothService() => _instance;
   BluetoothService._internal();
 
-  // Variáveis de conexão Bluetooth
   fbp.BluetoothDevice? _device;
   List<fbp.BluetoothService> _services = [];
   fbp.BluetoothCharacteristic? _characteristic;
   fbp.BluetoothCharacteristic? _controlCharacteristic;
   StreamSubscription<List<int>>? _valueSubscription;
   bool _isConnected = false;
-
-  // Flag para indicar se estamos no meio de uma operação
   bool _operationInProgress = false;
 
-  // Serviço Supabase
   final SupabaseService _supabaseService = SupabaseService();
 
-  // Getters públicos
   bool get isConnected => _isConnected;
   bool get isBusy => _operationInProgress;
 
-  // Iniciar a procura por dispositivos Bluetooth
   Future<void> startScan(
       {required String targetDeviceName,
       required Function(fbp.BluetoothDevice) onDeviceFound,
       required BuildContext context}) async {
     try {
-      // Verificar e lidar com o estado do Bluetooth
       var state = await fbp.FlutterBluePlus.adapterState.first;
       if (state != fbp.BluetoothAdapterState.on) {
         _showErrorMessage(
@@ -52,18 +40,12 @@ class BluetoothService {
       print("Iniciando scan por dispositivo: $targetDeviceName");
       await fbp.FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
 
-      // Usar um StreamSubscription para poder cancelar a escuta
-      // quando o dispositivo for encontrado
       StreamSubscription? scanSubscription;
       scanSubscription = fbp.FlutterBluePlus.scanResults.listen((results) {
         for (fbp.ScanResult result in results) {
           if (result.device.name == targetDeviceName) {
             print("Dispositivo encontrado: ${result.device.name}");
-
-            // Cancelar a escuta para não chamar o callback múltiplas vezes
             scanSubscription?.cancel();
-
-            // Chamar o callback com o dispositivo encontrado
             onDeviceFound(result.device);
             break;
           }
@@ -73,7 +55,6 @@ class BluetoothService {
         _showErrorMessage(context, 'Erro ao buscar dispositivos: $e');
       });
 
-      // Definir um timeout para verificar se o dispositivo não foi encontrado
       Future.delayed(const Duration(seconds: 6), () {
         scanSubscription?.cancel();
         print("Timeout do scan - verificando se dispositivo foi encontrado");
@@ -84,7 +65,6 @@ class BluetoothService {
     }
   }
 
-  // Conectar a um dispositivo Bluetooth específico e configurar serviço/característica
   Future<bool> connectToDevice(
       {required fbp.BluetoothDevice device,
       DataProcessor? dataProcessor,
@@ -99,28 +79,24 @@ class BluetoothService {
     try {
       print("Conectando ao dispositivo: ${device.name}");
 
-      // Verificar se já estamos conectados
       if (_isConnected && _device?.id == device.id) {
         print("Já conectado ao dispositivo");
         _operationInProgress = false;
         return true;
       }
 
-      // Se estiver conectado a outro dispositivo, desconectar primeiro
       if (_isConnected) {
         print(
             "Desconectando de dispositivo existente antes de conectar ao novo");
         await disconnect();
       }
 
-      // Conectar ao dispositivo com timeout
       bool connected = false;
       try {
         await device.connect(timeout: const Duration(seconds: 15));
         connected = true;
       } catch (e) {
         print("Erro ao conectar: $e");
-        // Ainda pode estar conectado mesmo com exceção, verificar status
         try {
           connected = device.isConnected;
         } catch (_) {
@@ -138,7 +114,6 @@ class BluetoothService {
       _isConnected = true;
       print("Dispositivo conectado, descobrindo serviços...");
 
-      // Descobrir serviços com retry
       int maxRetries = 3;
       for (int i = 0; i < maxRetries; i++) {
         try {
@@ -159,7 +134,6 @@ class BluetoothService {
 
       print("Serviços descobertos: ${_services.length}");
 
-      // Configurar os serviços e características
       bool foundService = false;
       for (fbp.BluetoothService service in _services) {
         if (service.uuid.toString() == "4fafc201-1fb5-459e-8fcc-c5c9c331914b") {
@@ -173,7 +147,6 @@ class BluetoothService {
               _characteristic = characteristic;
               print("Característica de dados encontrada");
 
-              // Configurar notificações
               try {
                 await characteristic.setNotifyValue(true);
                 _valueSubscription?.cancel();
@@ -181,14 +154,13 @@ class BluetoothService {
                   (value) {
                     try {
                       String rawData = ascii.decode(value);
+                      print("BLE → $rawData");
 
-                      // Log para depuração - remover ou comentar em produção
-                      print("Recebido: $rawData");
+                      // IMPORTANTE: Enviar TODOS os dados para o SupabaseService
+                      // Ele vai processar IMPACT_START, IMPACT_DATA, IMPACT_END
+                      _supabaseService.sendSensorData(rawData);
 
-                      // Enviar dados para o Supabase
-                      _sendDataToSupabase(rawData);
-
-                      // Se um processador de dados foi fornecido, também o chame
+                      // Processar também com callback customizado se fornecido
                       if (dataProcessor != null) {
                         dataProcessor(rawData);
                       }
@@ -203,7 +175,6 @@ class BluetoothService {
                 print("Notificações configuradas");
               } catch (e) {
                 print("Erro ao configurar notificações: $e");
-                // Continuar mesmo com erro - pode funcionar parcialmente
               }
             } else if (characteristic.uuid.toString() ==
                 "beb5483e-36e1-4688-b7f5-ea07361b26a9") {
@@ -251,31 +222,96 @@ class BluetoothService {
     }
   }
 
-  // Enviar comando com retry automático para modo neutro
+  // Enviar comando de modo de impacto (modo 0)
+  Future<bool> sendImpactModeRobust() async {
+    if (!_isConnected || _controlCharacteristic == null) {
+      print("Não conectado ou característica de controle não disponível");
+      return false;
+    }
+
+    print("Configurando modo de impacto...");
+
+    // Atualizar o SupabaseService também
+    _supabaseService.currentMode = OperationMode.impact;
+
+    bool success = false;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await _controlCharacteristic!.write(utf8.encode("0"));
+        print("Tentativa $attempt: Comando de modo impacto enviado");
+
+        await Future.delayed(Duration(milliseconds: 100));
+        await _controlCharacteristic!.write(utf8.encode("0"));
+
+        success = true;
+        print("Modo impacto ativado com sucesso na tentativa $attempt");
+        break;
+      } catch (e) {
+        print("Erro na tentativa $attempt: $e");
+        await Future.delayed(Duration(milliseconds: 300 * attempt));
+      }
+    }
+
+    return success;
+  }
+
+  // Enviar comando de modo contínuo (modo 1)
+  Future<bool> sendContinuousModeRobust() async {
+    if (!_isConnected || _controlCharacteristic == null) {
+      print("Não conectado ou característica de controle não disponível");
+      return false;
+    }
+
+    print("Configurando modo contínuo...");
+
+    // Atualizar o SupabaseService também
+    _supabaseService.currentMode = OperationMode.continuous;
+
+    bool success = false;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await _controlCharacteristic!.write(utf8.encode("1"));
+        print("Tentativa $attempt: Comando de modo contínuo enviado");
+
+        await Future.delayed(Duration(milliseconds: 100));
+        await _controlCharacteristic!.write(utf8.encode("1"));
+
+        success = true;
+        print("Modo contínuo ativado com sucesso na tentativa $attempt");
+        break;
+      } catch (e) {
+        print("Erro na tentativa $attempt: $e");
+        await Future.delayed(Duration(milliseconds: 300 * attempt));
+      }
+    }
+
+    return success;
+  }
+
+  // Enviar comando de modo neutro (modo 2)
   Future<bool> sendNeutralModeRobust() async {
     if (!_isConnected || _controlCharacteristic == null) {
       print("Não conectado ou característica de controle não disponível");
       return false;
     }
 
-    print("Iniciando tentativa robusta de envio do modo neutro...");
-    bool success = false;
+    print("Configurando modo neutro...");
 
-    // Tentar até 5 vezes com intervalos crescentes
+    // Atualizar o SupabaseService também
+    _supabaseService.currentMode = OperationMode.neutral;
+
+    bool success = false;
     for (int attempt = 1; attempt <= 5; attempt++) {
       try {
-        // Enviar comando de parada primeiro (modo 9) se for a primeira tentativa
         if (attempt == 1) {
           await _controlCharacteristic!.write(utf8.encode("9"));
           print("Comando de parada enviado");
           await Future.delayed(Duration(milliseconds: 100));
         }
 
-        // Enviar comando de modo neutro (modo 2)
         await _controlCharacteristic!.write(utf8.encode("2"));
         print("Tentativa $attempt: Comando de modo neutro enviado");
 
-        // Verificar se precisa enviar novamente para garantir
         if (attempt < 3) {
           await Future.delayed(Duration(milliseconds: 100));
           await _controlCharacteristic!.write(utf8.encode("2"));
@@ -283,12 +319,10 @@ class BluetoothService {
         }
 
         success = true;
-        print("Comando modo neutro enviado com sucesso na tentativa $attempt");
+        print("Modo neutro ativado com sucesso na tentativa $attempt");
         break;
       } catch (e) {
         print("Erro na tentativa $attempt: $e");
-
-        // Aguardar um tempo antes da próxima tentativa (intervalo exponencial)
         int delayMs = 200 * attempt;
         await Future.delayed(Duration(milliseconds: delayMs));
       }
@@ -297,78 +331,7 @@ class BluetoothService {
     return success;
   }
 
-  // Enviar comando com retry automático para modo contínuo
-  Future<bool> sendContinuousModeRobust() async {
-    if (!_isConnected || _controlCharacteristic == null) {
-      print("Não conectado ou característica de controle não disponível");
-      return false;
-    }
-
-    print("Iniciando tentativa robusta de envio do modo contínuo...");
-    bool success = false;
-
-    // Tentar até 3 vezes
-    for (int attempt = 1; attempt <= 3; attempt++) {
-      try {
-        // Enviar comando de modo contínuo (modo 1)
-        await _controlCharacteristic!.write(utf8.encode("1"));
-        print("Tentativa $attempt: Comando de modo contínuo enviado");
-
-        // Enviar novamente para garantir
-        await Future.delayed(Duration(milliseconds: 100));
-        await _controlCharacteristic!.write(utf8.encode("1"));
-
-        success = true;
-        print(
-            "Comando modo contínuo enviado com sucesso na tentativa $attempt");
-        break;
-      } catch (e) {
-        print("Erro na tentativa $attempt: $e");
-
-        // Aguardar antes da próxima tentativa
-        await Future.delayed(Duration(milliseconds: 300 * attempt));
-      }
-    }
-
-    return success;
-  }
-
-  // Enviar comando com retry automático para modo de impacto
-  Future<bool> sendImpactModeRobust() async {
-    if (!_isConnected || _controlCharacteristic == null) {
-      print("Não conectado ou característica de controle não disponível");
-      return false;
-    }
-
-    print("Iniciando tentativa robusta de envio do modo de impacto...");
-    bool success = false;
-
-    // Tentar até 3 vezes
-    for (int attempt = 1; attempt <= 3; attempt++) {
-      try {
-        // Enviar comando de modo impacto (modo 0)
-        await _controlCharacteristic!.write(utf8.encode("0"));
-        print("Tentativa $attempt: Comando de modo impacto enviado");
-
-        // Enviar novamente para garantir
-        await Future.delayed(Duration(milliseconds: 100));
-        await _controlCharacteristic!.write(utf8.encode("0"));
-
-        success = true;
-        print("Comando modo impacto enviado com sucesso na tentativa $attempt");
-        break;
-      } catch (e) {
-        print("Erro na tentativa $attempt: $e");
-
-        // Aguardar antes da próxima tentativa
-        await Future.delayed(Duration(milliseconds: 300 * attempt));
-      }
-    }
-
-    return success;
-  }
-
-  // Método simplificado para enviar comando de controle com garantia mínima
+  // Método simplificado para enviar comando de controle
   Future<bool> sendControlCommand(String command) async {
     if (!_isConnected || _controlCharacteristic == null) {
       print("Não conectado ou característica de controle não disponível");
@@ -376,10 +339,7 @@ class BluetoothService {
     }
 
     try {
-      // Enviar o comando
       await _controlCharacteristic!.write(utf8.encode(command));
-
-      // Reenviar após um pequeno delay para garantir
       await Future.delayed(Duration(milliseconds: 100));
       await _controlCharacteristic!.write(utf8.encode(command));
 
@@ -388,7 +348,6 @@ class BluetoothService {
     } catch (e) {
       print("Erro ao enviar comando: $e");
 
-      // Tentativa adicional em caso de erro
       try {
         await Future.delayed(Duration(milliseconds: 200));
         await _controlCharacteristic!.write(utf8.encode(command));
@@ -409,31 +368,30 @@ class BluetoothService {
     }
 
     try {
-      // Primeiro, enviar comando de parada emergencial
       await _controlCharacteristic!.write(utf8.encode("9"));
       print("Comando de parada emergencial enviado");
 
-      // Pequeno delay para o ESP processar
       await Future.delayed(Duration(milliseconds: 150));
 
-      // Depois, enviar comando para modo neutro
       await _controlCharacteristic!.write(utf8.encode("2"));
       print("Comando para modo neutro enviado");
 
-      // Enviar novamente para garantir
       await Future.delayed(Duration(milliseconds: 100));
       await _controlCharacteristic!.write(utf8.encode("2"));
       print("Comando para modo neutro reenviado");
+
+      // Atualizar SupabaseService
+      _supabaseService.currentMode = OperationMode.neutral;
 
       return true;
     } catch (e) {
       print("Erro ao interromper modo contínuo: $e");
 
-      // Tentativa de recovery em caso de erro
       try {
         await Future.delayed(Duration(milliseconds: 300));
         await _controlCharacteristic!.write(utf8.encode("2"));
         print("Modo neutro definido em tentativa de recuperação");
+        _supabaseService.currentMode = OperationMode.neutral;
         return true;
       } catch (e2) {
         print("Erro persistente: $e2");
@@ -450,14 +408,12 @@ class BluetoothService {
     }
 
     try {
-      // Enviar comando de modo neutro (modo 2)
       await _controlCharacteristic!.write(utf8.encode("2"));
-
-      // Pequeno delay e reenviar para garantir
       await Future.delayed(Duration(milliseconds: 100));
       await _controlCharacteristic!.write(utf8.encode("2"));
 
       print("Comando para modo neutro enviado com sucesso (2x)");
+      _supabaseService.currentMode = OperationMode.neutral;
       return true;
     } catch (e) {
       print("Erro ao definir modo neutro: $e");
@@ -465,7 +421,7 @@ class BluetoothService {
     }
   }
 
-  // Enviar comando sem esperar resposta (fire and forget)
+  // Enviar comando sem esperar resposta
   Future<void> sendCommandNoWait(String command) async {
     if (!_isConnected || _controlCharacteristic == null) {
       print("Não conectado ou característica de controle não disponível");
@@ -480,15 +436,6 @@ class BluetoothService {
     }
   }
 
-  // Enviar dados para o Supabase
-  void _sendDataToSupabase(String data) {
-    try {
-      _supabaseService.sendSensorData(data);
-    } catch (e) {
-      print('Erro ao enviar dados para o Supabase: $e');
-    }
-  }
-
   // Desconectar do dispositivo atual
   Future<void> disconnect({bool keepConnection = false}) async {
     if (_operationInProgress) {
@@ -500,21 +447,19 @@ class BluetoothService {
 
     if (!keepConnection && _device != null) {
       try {
-        // Primeiro, definir o modo neutro
         if (_isConnected && _controlCharacteristic != null) {
           try {
             await _controlCharacteristic!.write(utf8.encode("2"));
             print("Modo neutro definido antes de desconectar");
+            _supabaseService.currentMode = OperationMode.neutral;
           } catch (e) {
             print("Erro ao definir modo neutro antes de desconectar: $e");
           }
         }
 
-        // Cancelar subscription de notificações
         await _valueSubscription?.cancel();
         _valueSubscription = null;
 
-        // Desconectar do dispositivo
         print("Desconectando do dispositivo...");
         await _device!.disconnect();
         print("Dispositivo desconectado");
@@ -532,7 +477,6 @@ class BluetoothService {
     _operationInProgress = false;
   }
 
-  // Limpar recursos
   void dispose({bool keepConnection = false}) {
     if (!keepConnection) {
       disconnect();
@@ -541,7 +485,6 @@ class BluetoothService {
     }
   }
 
-  // Método auxiliar para mostrar mensagens de erro
   void _showErrorMessage(BuildContext context, String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
